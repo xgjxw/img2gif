@@ -210,7 +210,7 @@ class MainWindow(QWidget):
         self.last_output: Path | None = None
         self.movie: QMovie | None = None
 
-        self.setWindowTitle("img2gif")
+        self.setWindowTitle("微信表情包工具 · img2gif")
         self.resize(820, 680)
         self.setMinimumSize(760, 620)
         self.setAcceptDrops(True)
@@ -228,11 +228,11 @@ class MainWindow(QWidget):
         header_layout.setContentsMargins(20, 18, 20, 18)
         header_layout.setSpacing(8)
 
-        title = QLabel("img2gif")
+        title = QLabel("微信表情包工具")
         title.setObjectName("title")
-        subtitle = QLabel("把静态图、动图或剪贴板图片快速转换成更适合发送的 GIF。")
+        subtitle = QLabel("拖图、粘贴、预览、复制，一步把图片转换成更适合发送的 GIF。")
         subtitle.setObjectName("subtitle")
-        self.status_label = QLabel("拖拽图片到窗口，或使用粘贴按钮导入。")
+        self.status_label = QLabel("把图片拖进来，或直接粘贴到窗口。")
         self.status_label.setObjectName("statusInfo")
         header_layout.addWidget(title)
         header_layout.addWidget(subtitle)
@@ -391,7 +391,7 @@ class MainWindow(QWidget):
         self.setStyleSheet(
             """
             QWidget {
-                background: #f4f8f2;
+                background: #e8f4e0;
                 color: #243428;
                 font-size: 14px;
             }
@@ -401,12 +401,12 @@ class MainWindow(QWidget):
                 border-radius: 16px;
             }
             QFrame#dropZone {
-                background: #eef8ea;
-                border: 2px dashed #9ec28f;
+                background: #f0faeb;
+                border: 2px dashed #8fbc80;
                 border-radius: 16px;
             }
             QLabel#title {
-                font-size: 30px;
+                font-size: 28px;
                 font-weight: 700;
             }
             QLabel#subtitle {
@@ -447,7 +447,7 @@ class MainWindow(QWidget):
                 min-height: 46px;
                 border-radius: 12px;
                 border: 1px solid #d7e3d4;
-                background: #f8fbf7;
+                background: #ffffff;
                 padding: 8px 14px;
                 font-size: 15px;
                 font-weight: 500;

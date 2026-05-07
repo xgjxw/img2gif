@@ -58,14 +58,15 @@ pyinstaller -y --clean --windowed --onefile app.py -n img2gif
 
 ## GitHub Actions
 
-- 已包含 Windows 自动打包工作流：`.github/workflows/build-windows.yml`
+- 已包含桌面端自动打包工作流：`.github/workflows/build-desktop.yml`
 - 触发方式：
   - push 到 `main`
   - pull request
   - 手动执行 `workflow_dispatch`
 - 产物：
-  - `pic2meme-py.exe`
-  - `pic2meme-py-windows-x64.zip`
+  - `img2gif.exe`
+  - `img2gif-windows-x64.zip`
+  - `img2gif-macos.zip`
 
 ## Release 文案
 
