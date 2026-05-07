@@ -1,5 +1,3 @@
-import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -10,8 +8,8 @@ from datetime import datetime
 from pathlib import Path
 
 from PIL import Image, ImageSequence
-from PySide6.QtCore import QMimeData, QSize, Qt, QStandardPaths, QUrl
-from PySide6.QtGui import QGuiApplication, QIcon, QImage, QKeySequence, QMovie, QShortcut
+from PySide6.QtCore import QMimeData, QPoint, QRect, QSize, Qt, QStandardPaths, QUrl
+from PySide6.QtGui import QGuiApplication, QIcon, QImage, QKeySequence, QMovie, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -19,8 +17,9 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
-    QRadioButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -29,6 +28,13 @@ from PySide6.QtWidgets import (
 
 OUTPUT_DIR_NAME = "pic2meme-output"
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+SIZE_PRESETS = [
+    ("RAW", 0),
+    ("S", 40),
+    ("M", 80),
+    ("L", 120),
+    ("XL", 200),
+]
 
 
 def app_base_dir() -> Path:
@@ -50,14 +56,14 @@ def output_dir() -> Path:
     return target
 
 
-def new_output_path() -> Path:
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    return output_dir() / f"{stamp}.gif"
-
-
 def new_temp_path(suffix: str) -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     return Path(tempfile.gettempdir()) / f"img2gif_{stamp}{suffix}"
+
+
+def new_output_path(ext: str) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    return output_dir() / f"{stamp}{ext}"
 
 
 def reveal_in_file_manager(path: Path) -> None:
@@ -145,14 +151,33 @@ def convert_to_gif(source_path: Path, save_path: Path, mode: int, size_limit: in
         frames[0].save(save_path, **save_kwargs)
 
 
+def convert_to_png(source_path: Path, save_path: Path, size_limit: int) -> None:
+    with Image.open(source_path) as src:
+        frame = next(ImageSequence.Iterator(src), src)
+        normalized = normalize_frame(frame, size_limit)
+        normalized.save(save_path, format="PNG")
+
+
+def convert_output(source_path: Path, save_path: Path, output_format: str, mode: int, size_limit: int) -> None:
+    if output_format == "gif":
+        convert_to_gif(source_path, save_path, mode, size_limit)
+        return
+    if output_format == "png":
+        convert_to_png(source_path, save_path, size_limit)
+        return
+    raise RuntimeError(f"Unsupported format: {output_format}")
+
+
 def file_from_clipboard_image(image: QImage) -> Path:
     tmp = new_temp_path(".png")
     if not image.save(str(tmp), "PNG"):
-        raise RuntimeError("无法将剪贴板图片写入临时文件")
+        raise RuntimeError("Cannot write clipboard image to a temp file")
     return tmp
 
 
 def extract_html_image(html: str) -> str | None:
+    import re
+
     match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html, flags=re.IGNORECASE)
     if match:
         return match.group(1)
@@ -177,18 +202,107 @@ def fetch_remote_image(src: str) -> Path:
     return Path(src)
 
 
+class SidebarButton(QPushButton):
+    def __init__(self, text: str, active: bool = False) -> None:
+        super().__init__(text)
+        self.setCheckable(True)
+        self.setChecked(active)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setObjectName("sidebarActive" if active else "sidebarButton")
+
+
+class ChipButton(QPushButton):
+    def __init__(self, text: str, checked: bool = False) -> None:
+        super().__init__(text)
+        self.setCheckable(True)
+        self.setChecked(checked)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setObjectName("chipButton")
+
+
+class UtilityButton(QPushButton):
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setObjectName("utilityButton")
+
+
 class CardFrame(QFrame):
-    def __init__(self) -> None:
+    def __init__(self, object_name: str = "card") -> None:
         super().__init__()
-        self.setObjectName("card")
+        self.setObjectName(object_name)
 
 
-class DropFrame(QFrame):
+class CloudDropZone(QFrame):
     def __init__(self, window: "MainWindow") -> None:
         super().__init__()
         self.window = window
         self.setAcceptDrops(True)
         self.setObjectName("dropZone")
+        self.setMinimumHeight(340)
+
+        self.clouds = []
+        for _ in range(4):
+            bubble = QLabel(self)
+            bubble.setObjectName("cloudBubble")
+            bubble.lower()
+            self.clouds.append(bubble)
+
+        self.content = QWidget(self)
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(24, 24, 24, 24)
+        self.content_layout.setSpacing(14)
+        self.content_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.icon_circle = QLabel("UP")
+        self.icon_circle.setObjectName("dropIcon")
+        self.icon_circle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_circle.setFixedSize(92, 92)
+
+        self.title_label = QLabel("Drop Your Images Here!")
+        self.title_label.setObjectName("dropTitle")
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.subtitle_label = QLabel("OR CLICK TO BROWSE FILES")
+        self.subtitle_label.setObjectName("dropSubtitle")
+        self.subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.preview_label = QLabel("")
+        self.preview_label.setObjectName("mediaPreview")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setMinimumSize(260, 180)
+        self.preview_label.hide()
+
+        self.meta_label = QLabel("")
+        self.meta_label.setObjectName("dropMeta")
+        self.meta_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.movie: QMovie | None = None
+
+        self.content_layout.addWidget(self.icon_circle, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.content_layout.addWidget(self.title_label)
+        self.content_layout.addWidget(self.subtitle_label)
+        self.content_layout.addWidget(self.preview_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.content_layout.addWidget(self.meta_label)
+
+        self.reset_prompt()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self.content.setGeometry(self.rect())
+        positions = [
+            QRect(-10, 10, 108, 108),
+            QRect(self.width() - 95, 36, 76, 76),
+            QRect(self.width() - 160, self.height() - 110, 132, 132),
+            QRect(28, self.height() - 72, 66, 66),
+        ]
+        for bubble, geometry in zip(self.clouds, positions):
+            bubble.setGeometry(geometry)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        super().mousePressEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.window.import_from_dialog()
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
         if self.window.can_handle_mime(event.mimeData()):
@@ -197,10 +311,53 @@ class DropFrame(QFrame):
             event.ignore()
 
     def dropEvent(self, event) -> None:  # type: ignore[override]
-        if self.window.handle_mime(event.mimeData(), remember=True):
+        if self.window.handle_mime(event.mimeData()):
             event.acceptProposedAction()
         else:
             event.ignore()
+
+    def reset_prompt(self) -> None:
+        self.clear_media()
+        self.title_label.setText("Drop Your Images Here!")
+        self.subtitle_label.setText("OR CLICK TO BROWSE FILES")
+        self.meta_label.setText("")
+        self.icon_circle.show()
+        self.title_label.show()
+        self.subtitle_label.show()
+        self.preview_label.hide()
+
+    def clear_media(self) -> None:
+        self.preview_label.setMovie(None)
+        self.preview_label.clear()
+        self.movie = None
+
+    def show_media(self, path: Path, headline: str, detail: str) -> None:
+        self.icon_circle.hide()
+        self.title_label.setText(headline)
+        self.subtitle_label.setText(detail)
+        self.preview_label.show()
+        self.meta_label.setText(path.name)
+
+        suffix = path.suffix.lower()
+        self.clear_media()
+        if suffix == ".gif":
+            self.movie = QMovie(str(path))
+            if self.movie.isValid():
+                self.preview_label.setMovie(self.movie)
+                self.movie.start()
+                return
+
+        pixmap = QPixmap(str(path))
+        if not pixmap.isNull():
+            scaled = pixmap.scaled(
+                QSize(420, 240),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.preview_label.setPixmap(scaled)
+            return
+
+        self.preview_label.setText(path.name)
 
 
 class MainWindow(QWidget):
@@ -208,291 +365,517 @@ class MainWindow(QWidget):
         super().__init__()
         self.current_source: Path | None = None
         self.last_output: Path | None = None
-        self.movie: QMovie | None = None
-
-        self.setWindowTitle("微信表情包工具 · img2gif")
-        self.resize(820, 680)
-        self.setMinimumSize(760, 620)
-        self.setAcceptDrops(True)
+        self.recent_outputs: list[Path] = []
+        self.setWindowTitle("MemeEngine - Kawaii Creator")
+        self.resize(1180, 820)
+        self.setMinimumSize(1080, 760)
 
         icon_path = app_base_dir() / "icon.ico"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 24, 24, 24)
-        root.setSpacing(16)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        header = CardFrame()
-        header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(20, 18, 20, 18)
-        header_layout.setSpacing(8)
+        root.addWidget(self.build_sidebar())
+        root.addWidget(self.build_main_area(), stretch=1)
 
-        title = QLabel("微信表情包工具")
-        title.setObjectName("title")
-        subtitle = QLabel("拖图、粘贴、预览、复制，一步把图片转换成更适合发送的 GIF。")
-        subtitle.setObjectName("subtitle")
-        self.status_label = QLabel("把图片拖进来，或直接粘贴到窗口。")
-        self.status_label.setObjectName("statusInfo")
-        header_layout.addWidget(title)
-        header_layout.addWidget(subtitle)
-        header_layout.addWidget(self.status_label)
-        root.addWidget(header)
+        self.fab = QPushButton("+", self)
+        self.fab.setObjectName("fabButton")
+        self.fab.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fab.setFixedSize(60, 60)
+        self.fab.clicked.connect(lambda: reveal_in_file_manager(output_dir()))
 
-        option_layout = QGridLayout()
-        option_layout.setHorizontalSpacing(16)
-        option_layout.setVerticalSpacing(16)
-
-        mode_card = CardFrame()
-        mode_layout = QVBoxLayout(mode_card)
-        mode_layout.setContentsMargins(18, 16, 18, 16)
-        mode_layout.setSpacing(12)
-        mode_layout.addWidget(self.section_title("转换模式"))
-        mode_hint = QLabel("模式 1 保留细节更多；模式 2 关闭抖动，边缘更干净。")
-        mode_hint.setObjectName("hint")
-        mode_layout.addWidget(mode_hint)
-
-        self.mode_group = QButtonGroup(self)
-        mode_buttons = QHBoxLayout()
-        self.mode_1 = QRadioButton("模式 1 · 细节优先")
-        self.mode_2 = QRadioButton("模式 2 · 干净优先")
-        self.mode_1.setChecked(True)
-        self.mode_group.addButton(self.mode_1, 1)
-        self.mode_group.addButton(self.mode_2, 2)
-        mode_buttons.addWidget(self.mode_1)
-        mode_buttons.addWidget(self.mode_2)
-        mode_buttons.addStretch()
-        mode_layout.addLayout(mode_buttons)
-
-        size_card = CardFrame()
-        size_layout = QVBoxLayout(size_card)
-        size_layout.setContentsMargins(18, 16, 18, 16)
-        size_layout.setSpacing(12)
-        size_layout.addWidget(self.section_title("输出大小"))
-        size_hint = QLabel("原始尺寸会自动把超大图片压到最长边 1024，避免结果过重。")
-        size_hint.setObjectName("hint")
-        size_layout.addWidget(size_hint)
-
-        self.size_group = QButtonGroup(self)
-        size_buttons = QHBoxLayout()
-        for text, value, checked in [
-            ("原始", 0, True),
-            ("40", 40, False),
-            ("80", 80, False),
-            ("120", 120, False),
-            ("200", 200, False),
-        ]:
-            button = QRadioButton(text)
-            button.setChecked(checked)
-            self.size_group.addButton(button, value)
-            size_buttons.addWidget(button)
-        size_buttons.addStretch()
-        size_layout.addLayout(size_buttons)
-
-        option_layout.addWidget(mode_card, 0, 0)
-        option_layout.addWidget(size_card, 0, 1)
-        root.addLayout(option_layout)
-
-        content = QHBoxLayout()
-        content.setSpacing(16)
-
-        preview_card = CardFrame()
-        preview_layout = QVBoxLayout(preview_card)
-        preview_layout.setContentsMargins(18, 18, 18, 18)
-        preview_layout.setSpacing(12)
-        preview_layout.addWidget(self.section_title("预览"))
-
-        self.preview = QLabel("等待导入图片")
-        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview.setMinimumSize(QSize(340, 340))
-        self.preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.preview.setObjectName("preview")
-        preview_layout.addWidget(self.preview, stretch=1)
-
-        self.source_label = QLabel("来源：未导入")
-        self.source_label.setObjectName("meta")
-        self.output_label = QLabel(f"输出目录：{output_dir()}")
-        self.output_label.setWordWrap(True)
-        self.output_label.setObjectName("meta")
-        preview_layout.addWidget(self.source_label)
-        preview_layout.addWidget(self.output_label)
-
-        side_panel = QVBoxLayout()
-        side_panel.setSpacing(16)
-
-        drop_card = DropFrame(self)
-        drop_layout = QVBoxLayout(drop_card)
-        drop_layout.setContentsMargins(20, 20, 20, 20)
-        drop_layout.setSpacing(10)
-        drop_title = QLabel("导入图片")
-        drop_title.setObjectName("dropTitle")
-        drop_hint = QLabel("支持拖拽文件、粘贴剪贴板图片、或粘贴网页里的图片地址。")
-        drop_hint.setWordWrap(True)
-        drop_hint.setObjectName("hint")
-        shortcut_text = "快捷键：Windows / Linux 用 Ctrl+V，macOS 用 Command+V"
-        shortcut_label = QLabel(shortcut_text)
-        shortcut_label.setWordWrap(True)
-        shortcut_label.setObjectName("hint")
-        drop_layout.addWidget(drop_title)
-        drop_layout.addWidget(drop_hint)
-        drop_layout.addWidget(shortcut_label)
-        drop_layout.addStretch()
-
-        action_card = CardFrame()
-        action_layout = QVBoxLayout(action_card)
-        action_layout.setContentsMargins(18, 18, 18, 18)
-        action_layout.setSpacing(10)
-        action_layout.addWidget(self.section_title("操作"))
-
-        self.paste_button = QPushButton("从剪贴板导入")
-        self.reconvert_button = QPushButton("按当前参数重新生成")
-        self.copy_result_button = QPushButton("复制结果到剪贴板")
-        self.open_last_button = QPushButton("定位最后生成文件")
-        self.open_dir_button = QPushButton("打开输出目录")
-
-        for button in [
-            self.paste_button,
-            self.reconvert_button,
-            self.copy_result_button,
-            self.open_last_button,
-            self.open_dir_button,
-        ]:
-            action_layout.addWidget(button)
-
-        self.clipboard_note = QLabel(
-            "复制结果时会同时写入文件路径、文件 URL 和预览图。不同聊天软件对 GIF 剪贴板支持不完全一致。"
-        )
-        self.clipboard_note.setWordWrap(True)
-        self.clipboard_note.setObjectName("hint")
-        action_layout.addWidget(self.clipboard_note)
-        action_layout.addStretch()
-
-        side_panel.addWidget(drop_card, stretch=1)
-        side_panel.addWidget(action_card, stretch=1)
-
-        content.addWidget(preview_card, stretch=5)
-        content.addLayout(side_panel, stretch=4)
-        root.addLayout(content, stretch=1)
-
-        self.mode_group.idClicked.connect(lambda _id: self.reconvert())
-        self.size_group.idClicked.connect(lambda _id: self.reconvert())
-        self.paste_button.clicked.connect(self.handle_clipboard)
-        self.reconvert_button.clicked.connect(self.reconvert)
-        self.copy_result_button.clicked.connect(self.copy_result_to_clipboard)
-        self.open_last_button.clicked.connect(self.open_last_output)
-        self.open_dir_button.clicked.connect(lambda: reveal_in_file_manager(output_dir()))
-        QShortcut(QKeySequence(QKeySequence.StandardKey.Paste), self, activated=self.handle_clipboard)
+        QShortcut(QKeySequence(QKeySequence.StandardKey.Paste), self, activated=self.import_from_clipboard)
         QShortcut(QKeySequence(QKeySequence.StandardKey.Copy), self, activated=self.copy_result_to_clipboard)
 
-        self.set_buttons_enabled(has_output=False)
+        self.set_output_actions_enabled(False)
         self.apply_styles()
+        self.show_toast("Drop, paste, or browse an image to get started.", "info")
+
+    def build_sidebar(self) -> QWidget:
+        sidebar = QWidget()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(230)
+
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(22, 22, 22, 22)
+        layout.setSpacing(18)
+
+        brand = QWidget()
+        brand_layout = QVBoxLayout(brand)
+        brand_layout.setContentsMargins(0, 0, 0, 0)
+        brand_layout.setSpacing(2)
+        title = QLabel("MemeEngine")
+        title.setObjectName("brandTitle")
+        subtitle = QLabel("KAWAII CREATOR")
+        subtitle.setObjectName("brandSubtitle")
+        brand_layout.addWidget(title)
+        brand_layout.addWidget(subtitle)
+        layout.addWidget(brand)
+
+        self.maker_button = SidebarButton("MAKER", active=True)
+        self.collection_button = SidebarButton("COLLECTION")
+        self.settings_button = SidebarButton("SETTINGS")
+
+        nav_group = QButtonGroup(self)
+        nav_group.setExclusive(True)
+        for button in [self.maker_button, self.collection_button, self.settings_button]:
+            nav_group.addButton(button)
+            layout.addWidget(button)
+
+        self.collection_button.clicked.connect(lambda: reveal_in_file_manager(output_dir()))
+        self.settings_button.clicked.connect(self.clear_current)
+
+        layout.addStretch()
+
+        profile = CardFrame("profileCard")
+        profile_layout = QHBoxLayout(profile)
+        profile_layout.setContentsMargins(14, 14, 14, 14)
+        profile_layout.setSpacing(12)
+
+        avatar = QLabel("ME")
+        avatar.setObjectName("avatar")
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setFixedSize(44, 44)
+
+        profile_text = QVBoxLayout()
+        profile_text.setContentsMargins(0, 0, 0, 0)
+        profile_text.setSpacing(1)
+        name = QLabel("Kawaii User")
+        name.setObjectName("profileName")
+        plan = QLabel("PRO MEMBER")
+        plan.setObjectName("profilePlan")
+        profile_text.addWidget(name)
+        profile_text.addWidget(plan)
+
+        profile_layout.addWidget(avatar)
+        profile_layout.addLayout(profile_text)
+        layout.addWidget(profile)
+        return sidebar
+
+    def build_main_area(self) -> QWidget:
+        main = QWidget()
+        main.setObjectName("mainArea")
+        outer = QVBoxLayout(main)
+        outer.setContentsMargins(34, 24, 34, 24)
+        outer.setSpacing(24)
+        outer.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        self.toast = QLabel("")
+        self.toast.setObjectName("toastInfo")
+        self.toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outer.addWidget(self.toast, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        hero = QWidget()
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(0, 0, 0, 0)
+        hero_layout.setSpacing(4)
+        hero_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        title = QLabel("Make Some Magic!")
+        title.setObjectName("heroTitle")
+        subtitle = QLabel("Drop, squish, and share your cutest ideas")
+        subtitle.setObjectName("heroSubtitle")
+        hero_layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
+        hero_layout.addWidget(subtitle, alignment=Qt.AlignmentFlag.AlignCenter)
+        outer.addWidget(hero)
+
+        self.drop_zone = CloudDropZone(self)
+        outer.addWidget(self.drop_zone)
+
+        self.start_button = QPushButton("Start Magic ✨")
+        self.start_button.setObjectName("startButton")
+        self.start_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.start_button.clicked.connect(self.start_magic)
+        outer.addWidget(self.start_button, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        cards = QHBoxLayout()
+        cards.setSpacing(18)
+        cards.addWidget(self.build_format_card(), stretch=3)
+        cards.addWidget(self.build_size_card(), stretch=2)
+        outer.addLayout(cards)
+
+        outer.addWidget(self.build_action_panel())
+        return main
+
+    def build_format_card(self) -> QWidget:
+        card = CardFrame("pinkCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(16)
+
+        header = QHBoxLayout()
+        title = QLabel("Format")
+        title.setObjectName("cardTitle")
+        icon = QLabel("✦")
+        icon.setObjectName("cardIcon")
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(icon)
+        layout.addLayout(header)
+
+        self.format_group = QButtonGroup(self)
+        self.format_group.setExclusive(True)
+        format_row = QHBoxLayout()
+        for text, key, checked in [("GIF", "gif", True), ("PNG", "png", False)]:
+            button = ChipButton(text, checked=checked)
+            self.format_group.addButton(button)
+            button.setProperty("value", key)
+            format_row.addWidget(button)
+        layout.addLayout(format_row)
+
+        mode_title = QLabel("Style")
+        mode_title.setObjectName("miniLabel")
+        layout.addWidget(mode_title)
+
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.setExclusive(True)
+        mode_row = QHBoxLayout()
+        for text, value, checked in [("Mode 1", 1, True), ("Mode 2", 2, False)]:
+            button = ChipButton(text, checked=checked)
+            self.mode_group.addButton(button)
+            button.setProperty("value", value)
+            mode_row.addWidget(button)
+        layout.addLayout(mode_row)
+        return card
+
+    def build_size_card(self) -> QWidget:
+        card = CardFrame("yellowCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(16)
+
+        header = QHBoxLayout()
+        title = QLabel("Size")
+        title.setObjectName("cardTitle")
+        icon = QLabel("▣")
+        icon.setObjectName("cardIcon")
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(icon)
+        layout.addLayout(header)
+
+        self.size_group = QButtonGroup(self)
+        self.size_group.setExclusive(True)
+        size_row = QHBoxLayout()
+        for text, value in SIZE_PRESETS:
+            button = ChipButton(text, checked=(value == 80))
+            button.setProperty("value", value)
+            self.size_group.addButton(button)
+            size_row.addWidget(button)
+        layout.addLayout(size_row)
+        return card
+
+    def build_action_panel(self) -> QWidget:
+        card = CardFrame("actionCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("Toolbox")
+        title.setObjectName("toolboxTitle")
+        layout.addWidget(title)
+
+        actions = QGridLayout()
+        actions.setHorizontalSpacing(12)
+        actions.setVerticalSpacing(12)
+
+        self.import_button = UtilityButton("Paste / Import")
+        self.copy_button = UtilityButton("Copy Result")
+        self.open_current_button = UtilityButton("Open Current")
+        self.open_folder_button = UtilityButton("Open Folder")
+        self.clear_button = UtilityButton("Clear")
+
+        self.import_button.clicked.connect(self.import_from_clipboard)
+        self.copy_button.clicked.connect(self.copy_result_to_clipboard)
+        self.open_current_button.clicked.connect(self.open_current_output)
+        self.open_folder_button.clicked.connect(lambda: reveal_in_file_manager(output_dir()))
+        self.clear_button.clicked.connect(self.clear_current)
+
+        buttons = [
+            self.import_button,
+            self.copy_button,
+            self.open_current_button,
+            self.open_folder_button,
+            self.clear_button,
+        ]
+        positions = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1)]
+        for button, (row, col) in zip(buttons, positions):
+            actions.addWidget(button, row, col)
+
+        layout.addLayout(actions)
+
+        recent_title = QLabel("Recent Results")
+        recent_title.setObjectName("recentTitle")
+        layout.addWidget(recent_title)
+
+        self.recent_list = QListWidget()
+        self.recent_list.setObjectName("recentList")
+        self.recent_list.itemDoubleClicked.connect(self.open_recent_item)
+        layout.addWidget(self.recent_list)
+        return card
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        margin = 24
+        self.fab.move(self.width() - self.fab.width() - margin, self.height() - self.fab.height() - margin)
 
     def apply_styles(self) -> None:
         self.setStyleSheet(
             """
             QWidget {
-                background: #e8f4e0;
-                color: #243428;
+                background: #f8f9fa;
+                color: #4e4550;
+                font-family: "Plus Jakarta Sans", "Segoe UI", sans-serif;
                 font-size: 14px;
             }
-            QFrame#card {
+            QWidget#sidebar {
+                background: #f2f4f5;
+            }
+            QWidget#mainArea {
+                background: #f8f9fa;
+            }
+            QFrame#card, QFrame#pinkCard, QFrame#yellowCard, QFrame#actionCard, QFrame#profileCard {
                 background: #ffffff;
-                border: 1px solid #dfe9dc;
-                border-radius: 16px;
+                border: 1px solid rgba(128, 81, 94, 0.06);
+                border-radius: 26px;
+            }
+            QFrame#pinkCard {
+                background: #ffd9e1;
+            }
+            QFrame#yellowCard {
+                background: #f4e48a;
+            }
+            QFrame#actionCard {
+                background: #ffffff;
             }
             QFrame#dropZone {
-                background: #f0faeb;
-                border: 2px dashed #8fbc80;
-                border-radius: 16px;
+                background: #ffffff;
+                border-radius: 42px;
+                border: 1px solid rgba(128, 81, 94, 0.04);
             }
-            QLabel#title {
+            QLabel#cloudBubble {
+                background: rgba(255, 255, 255, 0.96);
+                border-radius: 54px;
+            }
+            QLabel#brandTitle {
+                font-size: 30px;
+                font-weight: 800;
+                color: #80515e;
+            }
+            QLabel#brandSubtitle {
+                font-size: 12px;
+                font-weight: 800;
+                color: #9b8f92;
+                letter-spacing: 1.8px;
+            }
+            QPushButton#sidebarButton, QPushButton#sidebarActive {
+                min-height: 48px;
+                text-align: left;
+                border: none;
+                border-radius: 24px;
+                padding: 0 18px;
+                font-size: 14px;
+                font-weight: 800;
+                letter-spacing: 1px;
+            }
+            QPushButton#sidebarButton {
+                background: transparent;
+                color: #72686b;
+            }
+            QPushButton#sidebarButton:hover {
+                background: #eceff1;
+            }
+            QPushButton#sidebarActive {
+                background: #ffc2d1;
+                color: #7b4d5a;
+            }
+            QLabel#avatar {
+                background: #f2b7c5;
+                color: #ffffff;
+                border-radius: 22px;
+                font-size: 14px;
+                font-weight: 800;
+            }
+            QLabel#profileName {
+                font-size: 14px;
+                font-weight: 700;
+            }
+            QLabel#profilePlan {
+                font-size: 10px;
+                font-weight: 800;
+                color: #918689;
+                letter-spacing: 1px;
+            }
+            QLabel#toastInfo {
+                min-width: 360px;
+                max-width: 520px;
+                border-radius: 28px;
+                padding: 14px 26px;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            QLabel#heroTitle {
+                font-size: 40px;
+                font-weight: 800;
+                color: #80515e;
+            }
+            QLabel#heroSubtitle {
+                font-size: 18px;
+                font-style: italic;
+                color: #9a8d92;
+            }
+            QLabel#dropIcon {
+                background: #ffc2d1;
+                color: #80515e;
+                border-radius: 46px;
+                font-size: 24px;
+                font-weight: 800;
+            }
+            QLabel#dropTitle {
+                font-size: 26px;
+                font-weight: 800;
+                color: #5a5255;
+            }
+            QLabel#dropSubtitle {
+                font-size: 13px;
+                font-weight: 800;
+                color: #a79da1;
+                letter-spacing: 1.6px;
+            }
+            QLabel#dropMeta {
+                font-size: 13px;
+                color: #7b7175;
+            }
+            QLabel#mediaPreview {
+                background: rgba(248, 249, 250, 0.9);
+                border-radius: 20px;
+                padding: 10px;
+            }
+            QPushButton#startButton {
+                min-width: 230px;
+                min-height: 70px;
+                border: none;
+                border-radius: 34px;
+                background: #aef2c2;
+                color: #2a6a45;
+                font-size: 28px;
+                font-weight: 800;
+                padding: 0 30px;
+            }
+            QPushButton#startButton:hover {
+                background: #9ae9b2;
+            }
+            QPushButton#startButton:pressed {
+                background: #8edca5;
+            }
+            QLabel#cardTitle {
+                font-size: 22px;
+                font-weight: 800;
+                color: #4e4550;
+            }
+            QLabel#cardIcon {
+                font-size: 22px;
+                font-weight: 800;
+                color: #6a5d61;
+            }
+            QLabel#miniLabel {
+                font-size: 12px;
+                font-weight: 800;
+                color: #6f6166;
+                letter-spacing: 1px;
+            }
+            QPushButton#chipButton {
+                min-height: 48px;
+                border-radius: 22px;
+                border: 2px solid rgba(128, 81, 94, 0.08);
+                background: rgba(255, 255, 255, 0.45);
+                color: #5a5054;
+                font-size: 16px;
+                font-weight: 800;
+                padding: 0 22px;
+            }
+            QPushButton#chipButton:checked {
+                background: #ffffff;
+                border-color: rgba(128, 81, 94, 0.18);
+            }
+            QLabel#toolboxTitle, QLabel#recentTitle {
+                font-size: 18px;
+                font-weight: 800;
+                color: #5a5054;
+            }
+            QPushButton#utilityButton {
+                min-height: 44px;
+                border-radius: 18px;
+                border: 1px solid rgba(128, 81, 94, 0.08);
+                background: #ffffff;
+                color: #5a5054;
+                font-size: 14px;
+                font-weight: 700;
+                padding: 0 16px;
+            }
+            QPushButton#utilityButton:hover {
+                background: #f6f7f8;
+            }
+            QPushButton#utilityButton:disabled {
+                color: #b2a9ac;
+                background: #fafafa;
+            }
+            QListWidget#recentList {
+                min-height: 120px;
+                background: #fbfbfc;
+                border: 1px solid rgba(128, 81, 94, 0.08);
+                border-radius: 20px;
+                padding: 8px;
+            }
+            QListWidget#recentList::item {
+                padding: 10px 12px;
+                border-radius: 12px;
+            }
+            QListWidget#recentList::item:selected {
+                background: #f4e48a;
+                color: #514700;
+            }
+            QPushButton#fabButton {
+                border: none;
+                border-radius: 30px;
+                background: #80515e;
+                color: #ffffff;
                 font-size: 28px;
                 font-weight: 700;
             }
-            QLabel#subtitle {
-                font-size: 15px;
-                color: #5a6d5e;
-            }
-            QLabel#statusInfo {
-                font-size: 15px;
-                color: #2f6d3a;
-                background: #edf8ef;
-                border-radius: 10px;
-                padding: 10px 12px;
-            }
-            QLabel#sectionTitle {
-                font-size: 18px;
-                font-weight: 600;
-            }
-            QLabel#preview {
-                background: #f7faf6;
-                border: 1px solid #e5eee2;
-                border-radius: 14px;
-                font-size: 18px;
-                color: #7b8d7f;
-            }
-            QLabel#dropTitle {
-                font-size: 22px;
-                font-weight: 600;
-            }
-            QLabel#hint, QLabel#meta {
-                color: #627065;
-                line-height: 1.5;
-            }
-            QRadioButton {
-                font-size: 15px;
-                spacing: 8px;
-            }
-            QPushButton {
-                min-height: 46px;
-                border-radius: 12px;
-                border: 1px solid #d7e3d4;
-                background: #ffffff;
-                padding: 8px 14px;
-                font-size: 15px;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background: #eff6ed;
-            }
-            QPushButton:pressed {
-                background: #e6efe3;
-            }
-            QPushButton:disabled {
-                color: #9aa69d;
-                background: #f3f5f2;
+            QPushButton#fabButton:hover {
+                background: #8a5a67;
             }
             """
         )
 
-    def section_title(self, text: str) -> QLabel:
-        label = QLabel(text)
-        label.setObjectName("sectionTitle")
-        return label
-
-    def set_status(self, text: str, tone: str = "info") -> None:
-        color_map = {
+    def show_toast(self, message: str, tone: str) -> None:
+        colors = {
             "info": ("#edf8ef", "#2f6d3a"),
-            "success": ("#edf8ef", "#2f6d3a"),
-            "warning": ("#fff7e8", "#8a5b12"),
-            "error": ("#fff0f0", "#a53d3d"),
+            "success": ("#aef2c2", "#2a6a45"),
+            "warning": ("#fff0be", "#6a5f12"),
+            "error": ("#ffdad6", "#93000a"),
         }
-        background, color = color_map.get(tone, color_map["info"])
-        self.status_label.setText(text)
-        self.status_label.setStyleSheet(
-            f"font-size: 15px; color: {color}; background: {background}; border-radius: 10px; padding: 10px 12px;"
+        background, foreground = colors.get(tone, colors["info"])
+        self.toast.setText(message)
+        self.toast.setStyleSheet(
+            f"background: {background}; color: {foreground}; border-radius: 28px; padding: 14px 26px; font-size: 18px; font-weight: 700;"
         )
 
-    def set_buttons_enabled(self, has_output: bool) -> None:
-        self.reconvert_button.setEnabled(self.current_source is not None)
-        self.copy_result_button.setEnabled(has_output)
-        self.open_last_button.setEnabled(has_output)
+    def current_format(self) -> str:
+        button = self.format_group.checkedButton()
+        return button.property("value") if button else "gif"
 
     def current_mode(self) -> int:
-        return self.mode_group.checkedId() or 1
+        button = self.mode_group.checkedButton()
+        return int(button.property("value")) if button else 1
 
     def current_size(self) -> int:
-        return self.size_group.checkedId()
+        button = self.size_group.checkedButton()
+        return int(button.property("value")) if button else 80
 
     def can_handle_mime(self, mime) -> bool:
         if mime.hasUrls() or mime.hasImage():
@@ -501,22 +884,38 @@ class MainWindow(QWidget):
             return True
         if mime.hasText():
             text = mime.text().strip()
-            return text.startswith(("http://", "https://", "file://")) or Path(text).exists()
+            return text.startswith(("http://", "https://", "file://")) or Path(text.strip('"')).exists()
         return False
+
+    def import_from_dialog(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose Image",
+            str(Path.home()),
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)",
+        )
+        if path:
+            self.set_source(Path(path))
+
+    def import_from_clipboard(self) -> None:
+        clipboard = QApplication.clipboard()
+        self.handle_mime(clipboard.mimeData())
 
     def resolve_source_from_text(self, text: str) -> Path:
         if not text:
-            raise RuntimeError("剪贴板内容为空")
+            raise RuntimeError("Clipboard text is empty")
         if text.startswith(("http://", "https://", "file://")):
             path = fetch_remote_image(text)
             if not path.exists():
-                raise RuntimeError("无法从文本地址读取图片")
+                raise RuntimeError("Cannot load image from clipboard text")
             return path
 
         candidate = Path(text.strip('"'))
         if is_supported_image(candidate):
             return candidate
-        raise RuntimeError("剪贴板文本不是可用的图片路径或图片地址")
+        raise RuntimeError("Clipboard text is not an image path or image URL")
 
     def resolve_source(self, mime) -> Path:
         if mime.hasUrls():
@@ -529,7 +928,7 @@ class MainWindow(QWidget):
                     remote = fetch_remote_image(url.toString())
                     if remote.exists():
                         return remote
-            raise RuntimeError("未找到可导入的图片文件")
+            raise RuntimeError("No supported image found in dropped items")
 
         if mime.hasImage():
             image = QGuiApplication.clipboard().image()
@@ -541,7 +940,7 @@ class MainWindow(QWidget):
                     image = image_data.toImage()
             if isinstance(image, QImage) and not image.isNull():
                 return file_from_clipboard_image(image)
-            raise RuntimeError("剪贴板图片为空")
+            raise RuntimeError("Clipboard image is empty")
 
         if mime.hasHtml():
             src = extract_html_image(mime.html())
@@ -549,80 +948,111 @@ class MainWindow(QWidget):
                 path = fetch_remote_image(src)
                 if path.exists():
                     return path
-            raise RuntimeError("HTML 中没有找到可用图片地址")
+            raise RuntimeError("No usable image found in clipboard HTML")
 
         if mime.hasText():
             return self.resolve_source_from_text(mime.text().strip())
 
-        raise RuntimeError("暂不支持这种导入方式")
+        raise RuntimeError("This import type is not supported")
 
-    def handle_mime(self, mime, remember: bool) -> bool:
+    def handle_mime(self, mime) -> bool:
         try:
             source = self.resolve_source(mime)
-            self.convert_source(source, remember=remember)
+            self.set_source(source)
             return True
         except Exception as exc:
-            self.preview.setText("等待导入图片")
-            self.preview.setMovie(None)
-            self.movie = None
-            self.set_status(f"转换失败：{exc}", tone="error")
-            self.set_buttons_enabled(has_output=self.last_output is not None and self.last_output.exists())
+            self.show_toast(f"Import failed: {exc}", "error")
             return False
 
-    def convert_source(self, source: Path, remember: bool) -> None:
-        output = new_output_path()
-        convert_to_gif(source, output, self.current_mode(), self.current_size())
-        self.last_output = output
-        if remember:
-            self.current_source = source
+    def set_source(self, source: Path) -> None:
+        self.current_source = source
+        self.last_output = None
+        self.drop_zone.show_media(source, "Image Loaded!", "Tap Start Magic when your settings look right")
+        self.show_toast("Success! Magic Ready.", "success")
+        self.set_output_actions_enabled(False)
 
-        self.source_label.setText(f"来源：{source}")
-        self.output_label.setText(f"输出文件：{output}")
-        self.show_preview(output)
-        self.set_status(f"转换成功，已生成：{output.name}", tone="success")
-        self.set_buttons_enabled(has_output=True)
-        reveal_in_file_manager(output)
+    def set_output_actions_enabled(self, enabled: bool) -> None:
+        self.copy_button.setEnabled(enabled)
+        self.open_current_button.setEnabled(enabled)
 
-    def show_preview(self, output: Path) -> None:
-        self.movie = QMovie(str(output))
-        self.preview.setText("")
-        self.preview.setMovie(self.movie)
-        self.movie.start()
-
-    def reconvert(self) -> None:
+    def start_magic(self) -> None:
         if not self.current_source:
-            self.set_status("还没有可重新生成的源图片，请先拖入图片或从剪贴板导入。", tone="warning")
+            self.show_toast("Import an image first, then hit Start Magic.", "warning")
             return
-        try:
-            self.convert_source(self.current_source, remember=False)
-        except Exception as exc:
-            self.set_status(f"重新生成失败：{exc}", tone="error")
 
-    def handle_clipboard(self) -> None:
-        clipboard = QApplication.clipboard()
-        self.handle_mime(clipboard.mimeData(), remember=True)
+        output_format = self.current_format()
+        ext = ".gif" if output_format == "gif" else ".png"
+        output = new_output_path(ext)
+
+        try:
+            convert_output(
+                self.current_source,
+                output,
+                output_format,
+                self.current_mode(),
+                self.current_size(),
+            )
+        except Exception as exc:
+            self.show_toast(f"Magic failed: {exc}", "error")
+            return
+
+        self.last_output = output
+        self.drop_zone.show_media(output, "Success! Magic Ready.", output.name)
+        self.update_recent_outputs(output)
+        self.set_output_actions_enabled(True)
+        self.show_toast(f"Success! {output.name} is ready.", "success")
+        reveal_in_file_manager(output)
 
     def copy_result_to_clipboard(self) -> None:
         if not self.last_output or not self.last_output.exists():
-            self.set_status("还没有可复制的结果文件。", tone="warning")
+            self.show_toast("No result yet. Run Start Magic first.", "warning")
             return
 
         mime = QMimeData()
         mime.setUrls([QUrl.fromLocalFile(str(self.last_output))])
         mime.setText(str(self.last_output))
-
         preview_image = QImage(str(self.last_output))
         if not preview_image.isNull():
             mime.setImageData(preview_image)
-
         QApplication.clipboard().setMimeData(mime)
-        self.set_status("已复制结果到剪贴板。部分应用会识别为文件，部分会识别为静态预览图。", tone="success")
+        self.show_toast("Result copied. Some apps will treat it as a file, some as a preview image.", "info")
 
-    def open_last_output(self) -> None:
-        if self.last_output and self.last_output.exists():
-            reveal_in_file_manager(self.last_output)
-        else:
-            reveal_in_file_manager(output_dir())
+    def open_current_output(self) -> None:
+        if not self.last_output or not self.last_output.exists():
+            self.show_toast("No current result to open.", "warning")
+            return
+        reveal_in_file_manager(self.last_output)
+
+    def clear_current(self) -> None:
+        self.current_source = None
+        self.last_output = None
+        self.drop_zone.reset_prompt()
+        self.set_output_actions_enabled(False)
+        self.show_toast("Cleared. Drop or paste a new image anytime.", "info")
+
+    def update_recent_outputs(self, output: Path) -> None:
+        self.recent_outputs = [item for item in self.recent_outputs if item.exists() and item != output]
+        self.recent_outputs.insert(0, output)
+        self.recent_outputs = self.recent_outputs[:8]
+
+        self.recent_list.clear()
+        for path in self.recent_outputs:
+            item = QListWidgetItem(f"{path.name}   |   {path.parent.name}")
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            self.recent_list.addItem(item)
+
+    def open_recent_item(self, item: QListWidgetItem) -> None:
+        raw = item.data(Qt.ItemDataRole.UserRole)
+        if not raw:
+            return
+        path = Path(raw)
+        if not path.exists():
+            self.show_toast("That recent result is no longer available.", "warning")
+            return
+        self.last_output = path
+        self.drop_zone.show_media(path, "Previewing Recent Result", path.name)
+        self.set_output_actions_enabled(True)
+        reveal_in_file_manager(path)
 
 
 def main() -> int:

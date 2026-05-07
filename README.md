@@ -13,6 +13,9 @@
 - 输出文件保存到桌面 `pic2meme-output`
 - 自动打开资源管理器并定位输出文件
 - 支持把结果复制回剪贴板
+- 支持清空当前状态、打开当前结果、查看最近结果
+- 新版 UI 采用更偏 kawaii / creator dashboard 的桌面风格
+- 支持 GIF / PNG 两种输出格式
 
 ## 依赖
 
@@ -59,6 +62,7 @@ pyinstaller -y --clean --windowed --onefile app.py -n img2gif
 ## GitHub Actions
 
 - 已包含桌面端自动打包工作流：`.github/workflows/build-desktop.yml`
+- 已包含 tag 自动发布工作流：`.github/workflows/release.yml`
 - 触发方式：
   - push 到 `main`
   - pull request
@@ -71,6 +75,7 @@ pyinstaller -y --clean --windowed --onefile app.py -n img2gif
 ## Release 文案
 
 - 首版 release 文案：`docs/release-notes-v0.1.0.md`
+- 推送 tag（如 `v0.1.0`）后会自动创建 GitHub Release 并附带 Windows / macOS 压缩包
 
 ## 说明
 

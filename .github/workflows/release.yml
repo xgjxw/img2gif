@@ -1,0 +1,112 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build exe
+        run: |
+          pyinstaller -y --clean --noconsole --onefile app.py -n img2gif --icon .\icon.ico
+
+      - name: Prepare zip
+        shell: pwsh
+        run: |
+          $bundleDir = "release\img2gif-windows-x64"
+          New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
+          Copy-Item "dist\img2gif.exe" "$bundleDir\img2gif.exe"
+          Copy-Item "README.md" "$bundleDir\README.md"
+          Compress-Archive -Path "$bundleDir\*" -DestinationPath "release\img2gif-windows-x64.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: release/img2gif-windows-x64.zip
+          if-no-files-found: error
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build macOS binary
+        run: |
+          pyinstaller -y --clean --windowed --onefile app.py -n img2gif
+
+      - name: Prepare zip
+        run: |
+          mkdir -p release/img2gif-macos
+          cp dist/img2gif release/img2gif-macos/img2gif
+          cp README.md release/img2gif-macos/README.md
+          cd release
+          zip -r img2gif-macos.zip img2gif-macos
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: release/img2gif-macos.zip
+          if-no-files-found: error
+
+  publish-release:
+    needs:
+      - build-windows
+      - build-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-windows
+          path: release-assets
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-macos
+          path: release-assets
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: docs/release-notes-v0.1.0.md
+          files: |
+            release-assets/img2gif-windows-x64.zip
+            release-assets/img2gif-macos.zip
