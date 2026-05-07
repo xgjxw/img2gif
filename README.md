@@ -39,6 +39,21 @@ python -m venv .venv
 .\.venv\Scripts\pyinstaller -y --clean --noconsole --onefile app.py -n pic2meme-py --icon .\icon.ico
 ```
 
+## GitHub Actions
+
+- 已包含 Windows 自动打包工作流：`.github/workflows/build-windows.yml`
+- 触发方式：
+  - push 到 `main`
+  - pull request
+  - 手动执行 `workflow_dispatch`
+- 产物：
+  - `pic2meme-py.exe`
+  - `pic2meme-py-windows-x64.zip`
+
+## Release 文案
+
+- 首版 release 文案：`docs/release-notes-v0.1.0.md`
+
 ## 说明
 
 - 这个版本不依赖“复制文件到剪贴板”，避免原始实现里常见的剪贴板失败问题。
